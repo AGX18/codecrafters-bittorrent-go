@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -131,6 +132,46 @@ func decodeBencodedDictValue(bencodedString string) (map[string]interface{}, int
 
 }
 
+func extractRawInfo(bencodedString string) (string, error) {
+	if len(bencodedString) == 0 || bencodedString[0] != 'd' {
+		return "", fmt.Errorf("invalid bencoded dict")
+	}
+
+	offset := 1
+	for {
+		if offset >= len(bencodedString) {
+			return "", fmt.Errorf("unterminated bencoded dict")
+		}
+		if bencodedString[offset] == 'e' {
+			return "", fmt.Errorf("couldn't the info field")
+		}
+
+		decodedKey, consumed, err := decodeBencodeValue(bencodedString[offset:])
+		if err != nil {
+			return "", fmt.Errorf("decode dect item: %w", err)
+		}
+		key, ok := decodedKey.(string)
+		if !ok {
+			return "", fmt.Errorf("decode dictionary key: %w", err)
+		}
+		offset += consumed
+
+		valueStart := offset
+		_, consumed, err = decodeBencodeValue(bencodedString[offset:])
+		if err != nil {
+			return "", err
+		}
+		valueEnd := valueStart + consumed
+
+		if key == "info" {
+			return bencodedString[valueStart:valueEnd], nil
+		}
+
+		offset = valueEnd
+
+	}
+}
+
 func decodeBencodedListValue(bencodedString string) ([]interface{}, int, error) {
 	if len(bencodedString) == 0 || bencodedString[0] != 'l' {
 		return nil, 0, fmt.Errorf("invalid bencoded list")
@@ -153,6 +194,15 @@ func decodeBencodedListValue(bencodedString string) ([]interface{}, int, error) 
 		offset += consumed
 	}
 
+}
+
+func calculateInfoHash(torrentData []byte) ([20]byte, error) {
+	infoBytes, err := extractRawInfo(string(torrentData))
+	if err != nil {
+		return [20]byte{}, err
+	}
+
+	return sha1.Sum([]byte(infoBytes)), nil
 }
 
 func main() {
@@ -201,9 +251,14 @@ func main() {
 			fmt.Println("Tracker URL must be a string")
 			os.Exit(1)
 		}
+		hash, err := calculateInfoHash(data)
+		if err != nil {
+			fmt.Printf("error while hashing the info section: %v", err)
+		}
 
 		fmt.Printf("Tracker URL: %s", announce)
 		fmt.Printf("Length: %d", info["length"])
+		fmt.Printf("Length: %x", hash)
 
 	default:
 		fmt.Println("Unknown command: " + command)
