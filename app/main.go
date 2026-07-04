@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"unicode"
 	// bencode "github.com/jackpal/bencode-go" // Available if you need it!
 )
 
@@ -47,7 +46,7 @@ func decodeBencodeValue(bencodedString string) (interface{}, int, error) {
 	}
 
 	switch {
-	case unicode.IsDigit(rune(bencodedString[0])):
+	case bencodedString[0] >= '0' && bencodedString[0] <= '9':
 		// decoding a string
 		colonIndex := -1
 		for i := 0; i < len(bencodedString); i++ {
@@ -162,7 +161,8 @@ func main() {
 
 	command := os.Args[1]
 
-	if command == "decode" {
+	switch command {
+	case "decode":
 		bencodedValue := os.Args[2]
 
 		decoded, err := decodeBencode(bencodedValue)
@@ -173,7 +173,39 @@ func main() {
 
 		jsonOutput, _ := json.Marshal(decoded)
 		fmt.Println(string(jsonOutput))
-	} else {
+	case "info":
+		if len(os.Args) <= 2 {
+			fmt.Println("not enough arguments, you must provide the path of the .torrent file")
+			os.Exit(1)
+		}
+		data, err := os.ReadFile(os.Args[2])
+		if err != nil {
+			fmt.Printf("error while opening the file %v", err)
+			os.Exit(1)
+		}
+		decoded, err := decodeBencode(string(data))
+		torrent, ok := decoded.(map[string]interface{})
+		if !ok {
+			fmt.Println("torrent metadata must be a dictionary")
+			os.Exit(1)
+		}
+
+		info, ok := torrent["info"].(map[string]interface{})
+		if !ok {
+			fmt.Println("torrent info must be a dictionary")
+			os.Exit(1)
+		}
+
+		announce, ok := torrent["announce"].(string)
+		if !ok {
+			fmt.Println("Tracker URL must be a string")
+			os.Exit(1)
+		}
+
+		fmt.Printf("Tracker URL: %s", announce)
+		fmt.Printf("Length: %d", info["length"])
+
+	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
 	}
