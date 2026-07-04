@@ -113,17 +113,17 @@ func decodeBencodedDictValue(bencodedString string) (map[string]interface{}, int
 
 		decodedKey, consumed, err := decodeBencodeValue(bencodedString[offset:])
 		if err != nil {
-			return nil, 0, fmt.Errorf("decode dect item: %w", err)
+			return nil, 0, fmt.Errorf("decode dict item: %w", err)
 		}
 		key, ok := decodedKey.(string)
 		if !ok {
-			return nil, 0, fmt.Errorf("decode dictionary key: %w", err)
+			return nil, 0, fmt.Errorf("dictionary key must be a string")
 		}
 		offset += consumed
 
 		value, consumed, err := decodeBencodeValue(bencodedString[offset:])
 		if err != nil {
-			return nil, 0, fmt.Errorf("decode dictionary key: %w", err)
+			return nil, 0, fmt.Errorf("decode dictionary value: %w", err)
 		}
 		offset += consumed
 
@@ -148,11 +148,11 @@ func extractRawInfo(bencodedString string) (string, error) {
 
 		decodedKey, consumed, err := decodeBencodeValue(bencodedString[offset:])
 		if err != nil {
-			return "", fmt.Errorf("decode dect item: %w", err)
+			return "", fmt.Errorf("decode dict item: %w", err)
 		}
 		key, ok := decodedKey.(string)
 		if !ok {
-			return "", fmt.Errorf("decode dictionary key: %w", err)
+			return "", fmt.Errorf("dictionary key must be a string")
 		}
 		offset += consumed
 
@@ -234,6 +234,9 @@ func main() {
 			os.Exit(1)
 		}
 		decoded, err := decodeBencode(string(data))
+		if err != nil {
+			fmt.Printf("torrent metadata could not be decoded: %v", err)
+		}
 		torrent, ok := decoded.(map[string]interface{})
 		if !ok {
 			fmt.Println("torrent metadata must be a dictionary")
@@ -251,14 +254,37 @@ func main() {
 			fmt.Println("Tracker URL must be a string")
 			os.Exit(1)
 		}
+		pieceLength, ok := info["piece length"].(int)
+		if !ok {
+			fmt.Println("piece length must be a integer")
+			fmt.Printf("Piece length: %v", pieceLength)
+			os.Exit(1)
+		}
+		pieces, ok := info["pieces"].(string)
+		if !ok {
+			fmt.Println("piece length must be a integer")
+			os.Exit(1)
+		}
 		hash, err := calculateInfoHash(data)
 		if err != nil {
 			fmt.Printf("error while hashing the info section: %v", err)
+			os.Exit(1)
 		}
 
-		fmt.Printf("Tracker URL: %s", announce)
-		fmt.Printf("Length: %d", info["length"])
-		fmt.Printf("Info Hash: %x", hash)
+		if len(pieces)%20 != 0 {
+			fmt.Printf("malformed pieces hashes: not 20 bytes each")
+			os.Exit(1)
+		}
+
+		fmt.Printf("Tracker URL: %s\n", announce)
+		fmt.Printf("Length: %d\n", info["length"])
+		fmt.Printf("Info Hash: %x\n", hash)
+		fmt.Printf("Piece Length: %d\n", pieceLength)
+		fmt.Println("Piece Hashes:")
+		count := len(pieces) / 20
+		for i := 0; i < count; i++ {
+			fmt.Printf("%x\n", pieces[20*i:20*i+20])
+		}
 
 	default:
 		fmt.Println("Unknown command: " + command)
