@@ -89,9 +89,47 @@ func decodeBencodeValue(bencodedString string) (interface{}, int, error) {
 
 	case bencodedString[0] == 'l':
 		return decodeBencodedListValue(bencodedString)
+	case bencodedString[0] == 'd':
+		return decodeBencodedDictValue(bencodedString)
 	default:
 		return nil, 0, fmt.Errorf("unsupported bencoded value")
 	}
+}
+
+func decodeBencodedDictValue(bencodedString string) (map[string]interface{}, int, error) {
+	if len(bencodedString) == 0 || bencodedString[0] != 'd' {
+		return nil, 0, fmt.Errorf("invalid bencoded dict")
+	}
+
+	values := make(map[string]interface{})
+	offset := 1
+	for {
+		if offset >= len(bencodedString) {
+			return nil, 0, fmt.Errorf("unterminated bencoded dict")
+		}
+		if bencodedString[offset] == 'e' {
+			return values, offset + 1, nil
+		}
+
+		decodedKey, consumed, err := decodeBencodeValue(bencodedString[offset:])
+		if err != nil {
+			return nil, 0, fmt.Errorf("decode dect item: %w", err)
+		}
+		key, ok := decodedKey.(string)
+		if !ok {
+			return nil, 0, fmt.Errorf("decode dictionary key: %w", err)
+		}
+		offset += consumed
+
+		value, consumed, err := decodeBencodeValue(bencodedString[offset:])
+		if err != nil {
+			return nil, 0, fmt.Errorf("decode dictionary key: %w", err)
+		}
+		offset += consumed
+
+		values[key] = value
+	}
+
 }
 
 func decodeBencodedListValue(bencodedString string) ([]interface{}, int, error) {
