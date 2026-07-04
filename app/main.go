@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
 	"crypto/sha1"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"strconv"
+	"time"
 	// bencode "github.com/jackpal/bencode-go" // Available if you need it!
 )
 
@@ -282,8 +287,104 @@ func main() {
 		fmt.Printf("Piece Length: %d\n", pieceLength)
 		fmt.Println("Piece Hashes:")
 		count := len(pieces) / 20
-		for i := 0; i < count; i++ {
+		for i := range count {
 			fmt.Printf("%x\n", pieces[20*i:20*i+20])
+		}
+	case "peers":
+		if len(os.Args) <= 2 {
+			fmt.Println("not enough arguments, you must provide the path of the .torrent file")
+			os.Exit(1)
+		}
+		data, err := os.ReadFile(os.Args[2])
+		if err != nil {
+			fmt.Printf("error while opening the file %v", err)
+			os.Exit(1)
+		}
+		decoded, err := decodeBencode(string(data))
+		if err != nil {
+			fmt.Printf("torrent metadata could not be decoded: %v", err)
+			os.Exit(1)
+		}
+		torrent, ok := decoded.(map[string]interface{})
+		if !ok {
+			fmt.Println("torrent metadata must be a dictionary")
+			os.Exit(1)
+		}
+
+		hash, err := calculateInfoHash(data)
+		if err != nil {
+			fmt.Printf("error while hashing the info section: %v", err)
+			os.Exit(1)
+		}
+
+		peerID := []byte("-BT0001-123456789012") // exactly 20 bytes
+
+		announce, ok := torrent["announce"].(string)
+		if !ok {
+			fmt.Println("Tracker URL must be a string")
+			os.Exit(1)
+		}
+
+		info, ok := torrent["info"].(map[string]interface{})
+		if !ok {
+			fmt.Println("torrent info must be a dictionary")
+			os.Exit(1)
+		}
+
+		length, ok := info["length"].(int)
+		if !ok {
+			fmt.Println("error while parsing length")
+			os.Exit(1)
+		}
+
+		trackerRequest := TrackerRequest{
+			AnnounceURL: announce,
+			InfoHash:    hash,
+			PeerID:      [20]byte(peerID),
+			Port:        6881,
+			Uploaded:    0,
+			Downloaded:  0,
+			Left:        int64(length),
+			Compact:     true,
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		client := &http.Client{
+			Timeout: 20 * time.Second,
+		}
+
+		responseData, err := requestPeers(ctx, client, trackerRequest)
+		if err != nil {
+			fmt.Printf("error while sending the request: %v", err)
+			os.Exit(1)
+		}
+
+		decoded, err = decodeBencode(string(responseData))
+		if err != nil {
+			fmt.Printf("error while decoding the response: %v", err)
+			os.Exit(1)
+		}
+		trackerResponse, ok := decoded.(map[string]interface{})
+		if !ok {
+			fmt.Println("error while decoding the response")
+			os.Exit(1)
+		}
+		peers, ok := trackerResponse["peers"].(string)
+		if !ok {
+			fmt.Println("tracker peers must be a byte string")
+			os.Exit(1)
+		}
+
+		if len(peers)%6 != 0 {
+			fmt.Println("compact peer data has invalid length")
+			os.Exit(1)
+		}
+		for i := 0; i < len(peers); i += 6 {
+			ip := net.IP([]byte(peers[i : i+4]))
+			port := binary.BigEndian.Uint16([]byte(peers[i+4 : i+6]))
+
+			fmt.Printf("%s:%d\n", ip, port)
 		}
 
 	default:
