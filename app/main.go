@@ -16,37 +16,106 @@ var _ = json.Marshal
 // - 5:hello -> hello
 // - 10:hello12345 -> hello12345
 func decodeBencode(bencodedString string) (interface{}, error) {
-	if unicode.IsDigit(rune(bencodedString[0])) {
-		var firstColonIndex int
+	value, consumed, err := decodeBencodeValue(bencodedString)
 
+	if err != nil {
+		return nil, err
+	}
+
+	if consumed != len(bencodedString) {
+		return nil, fmt.Errorf("unexpected trailing data")
+	}
+
+	return value, nil
+}
+
+func decodeBencodedList(bencodedString string) ([]interface{}, error) {
+	value, consumed, err := decodeBencodedListValue(bencodedString)
+	if err != nil {
+		return nil, err
+	}
+	if consumed != len(bencodedString) {
+		return nil, fmt.Errorf("unexpected trailing data")
+	}
+
+	return value, nil
+}
+
+func decodeBencodeValue(bencodedString string) (interface{}, int, error) {
+	if len(bencodedString) == 0 {
+		return nil, 0, fmt.Errorf("empty bencoded value")
+	}
+
+	switch {
+	case unicode.IsDigit(rune(bencodedString[0])):
+		// decoding a string
+		colonIndex := -1
 		for i := 0; i < len(bencodedString); i++ {
 			if bencodedString[i] == ':' {
-				firstColonIndex = i
+				colonIndex = i
 				break
 			}
 		}
-
-		lengthStr := bencodedString[:firstColonIndex]
-
-		length, err := strconv.Atoi(lengthStr)
+		if colonIndex == -1 {
+			return nil, 0, fmt.Errorf("invalid bencoded string")
+		}
+		length, err := strconv.Atoi(bencodedString[:colonIndex])
 		if err != nil {
-			return "", err
+			return nil, 0, fmt.Errorf("decode string length: %w", err)
 		}
+		end := colonIndex + 1 + length
+		if end > len(bencodedString) {
+			return nil, 0, fmt.Errorf("bencoded string exceeds input")
+		}
+		return bencodedString[colonIndex+1 : end], end, nil
 
-		return bencodedString[firstColonIndex+1 : firstColonIndex+1+length], nil
-	} else if bencodedString[0] == 'i' {
-		var firstEIndex int
-
-		for i := 0; i < len(bencodedString); i++ {
+	case bencodedString[0] == 'i':
+		// decode integer
+		endIndex := -1
+		for i := 1; i < len(bencodedString); i++ {
 			if bencodedString[i] == 'e' {
-				firstEIndex = i
+				endIndex = i
 				break
 			}
 		}
-		return strconv.Atoi(bencodedString[1:firstEIndex])
-	} else {
-		return "", fmt.Errorf("Unsupported")
+		if endIndex == -1 {
+			return nil, 0, fmt.Errorf("unterminated bencoded integer")
+		}
+		val, err := strconv.Atoi(bencodedString[1:endIndex])
+		if err != nil {
+			return nil, 0, fmt.Errorf("decode integer: %w", err)
+		}
+		return val, endIndex + 1, nil
+
+	case bencodedString[0] == 'l':
+		return decodeBencodedListValue(bencodedString)
+	default:
+		return nil, 0, fmt.Errorf("unsupported bencoded value")
 	}
+}
+
+func decodeBencodedListValue(bencodedString string) ([]interface{}, int, error) {
+	if len(bencodedString) == 0 || bencodedString[0] != 'l' {
+		return nil, 0, fmt.Errorf("invalid bencoded list")
+	}
+
+	values := make([]interface{}, 0) // this where will store the list items
+	offset := 1
+	for {
+		if offset >= len(bencodedString) {
+			return nil, 0, fmt.Errorf("unterminated bencoded list")
+		}
+		if bencodedString[offset] == 'e' {
+			return values, offset + 1, nil
+		}
+		value, consumed, err := decodeBencodeValue(bencodedString[offset:])
+		if err != nil {
+			return nil, 0, fmt.Errorf("decode list item: %w", err)
+		}
+		values = append(values, value)
+		offset += consumed
+	}
+
 }
 
 func main() {
@@ -56,8 +125,6 @@ func main() {
 	command := os.Args[1]
 
 	if command == "decode" {
-		// TODO: Uncomment the code below to pass the first stage
-		//
 		bencodedValue := os.Args[2]
 
 		decoded, err := decodeBencode(bencodedValue)
