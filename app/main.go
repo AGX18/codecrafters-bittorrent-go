@@ -579,7 +579,15 @@ func main() {
 				fmt.Printf("downloading the piece: %d failed\n", pieceIndex)
 			}
 		}
+	case "magnet_parse ":
+		magnet, err := parseMagnetLink(os.Args[2])
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
 
+		fmt.Println("Tracker URL:", magnet.Trackers[0])
+		fmt.Printf("Info Hash: %x\n", magnet.InfoHash)
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
