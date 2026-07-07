@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -148,7 +150,7 @@ func extractRawInfo(bencodedString string) (string, error) {
 			return "", fmt.Errorf("unterminated bencoded dict")
 		}
 		if bencodedString[offset] == 'e' {
-			return "", fmt.Errorf("couldn't the info field")
+			return "", fmt.Errorf("couldn't find the info field")
 		}
 
 		decodedKey, consumed, err := decodeBencodeValue(bencodedString[offset:])
@@ -210,6 +212,89 @@ func calculateInfoHash(torrentData []byte) ([20]byte, error) {
 	return sha1.Sum([]byte(infoBytes)), nil
 }
 
+type torrentMetadata struct {
+	Info     map[string]interface{}
+	Announce string
+	InfoHash [20]byte
+}
+
+func loadTorrentMetadata(path string) (torrentMetadata, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return torrentMetadata{}, fmt.Errorf("read torrent file: %w", err)
+	}
+
+	decoded, err := decodeBencode(string(data))
+	if err != nil {
+		return torrentMetadata{}, fmt.Errorf("decode torrent metadata: %w", err)
+	}
+
+	torrent, ok := decoded.(map[string]interface{})
+	if !ok {
+		return torrentMetadata{}, fmt.Errorf("torrent metadata must be a dictionary")
+	}
+
+	announce, ok := torrent["announce"].(string)
+	if !ok {
+		return torrentMetadata{}, fmt.Errorf("tracker url must be a string")
+	}
+
+	info, ok := torrent["info"].(map[string]interface{})
+	if !ok {
+		return torrentMetadata{}, fmt.Errorf("torrent info must be a dictionary")
+	}
+
+	hash, err := calculateInfoHash(data)
+	if err != nil {
+		return torrentMetadata{}, fmt.Errorf("hash info section: %w", err)
+	}
+
+	return torrentMetadata{
+		Info:     info,
+		Announce: announce,
+		InfoHash: hash,
+	}, nil
+}
+
+func torrentLength(info map[string]interface{}) (int, error) {
+	length, ok := info["length"].(int)
+	if !ok {
+		return 0, fmt.Errorf("torrent length must be an integer")
+	}
+
+	return length, nil
+}
+
+func decodeTrackerResponse(responseData []byte) (map[string]interface{}, error) {
+	decoded, err := decodeBencode(string(responseData))
+	if err != nil {
+		return nil, fmt.Errorf("decode tracker response: %w", err)
+	}
+
+	trackerResponse, ok := decoded.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("tracker response must be a dictionary")
+	}
+
+	return trackerResponse, nil
+}
+
+func parseCompactPeers(peers string) ([]string, error) {
+	if len(peers)%6 != 0 {
+		return nil, fmt.Errorf("compact peer data has invalid length")
+	}
+
+	addresses := make([]string, 0, len(peers)/6)
+	for i := 0; i < len(peers); i += 6 {
+		ip := net.IP([]byte(peers[i : i+4]))
+		port := binary.BigEndian.Uint16([]byte(peers[i+4 : i+6]))
+
+		addresses = append(addresses, fmt.Sprintf("%s:%d", ip, port))
+	}
+
+	return addresses, nil
+}
+
 func main() {
 	// You can use print statements as follows for debugging, they'll be visible when running tests.
 	fmt.Fprintln(os.Stderr, "Logs from your program will appear here!")
@@ -233,46 +318,22 @@ func main() {
 			fmt.Println("not enough arguments, you must provide the path of the .torrent file")
 			os.Exit(1)
 		}
-		data, err := os.ReadFile(os.Args[2])
+
+		metadata, err := loadTorrentMetadata(os.Args[2])
 		if err != nil {
-			fmt.Printf("error while opening the file %v", err)
-			os.Exit(1)
-		}
-		decoded, err := decodeBencode(string(data))
-		if err != nil {
-			fmt.Printf("torrent metadata could not be decoded: %v", err)
-		}
-		torrent, ok := decoded.(map[string]interface{})
-		if !ok {
-			fmt.Println("torrent metadata must be a dictionary")
+			fmt.Printf("error while loading torrent metadata: %v", err)
 			os.Exit(1)
 		}
 
-		info, ok := torrent["info"].(map[string]interface{})
-		if !ok {
-			fmt.Println("torrent info must be a dictionary")
-			os.Exit(1)
-		}
-
-		announce, ok := torrent["announce"].(string)
-		if !ok {
-			fmt.Println("Tracker URL must be a string")
-			os.Exit(1)
-		}
-		pieceLength, ok := info["piece length"].(int)
+		pieceLength, ok := metadata.Info["piece length"].(int)
 		if !ok {
 			fmt.Println("piece length must be a integer")
 			fmt.Printf("Piece length: %v", pieceLength)
 			os.Exit(1)
 		}
-		pieces, ok := info["pieces"].(string)
+		pieces, ok := metadata.Info["pieces"].(string)
 		if !ok {
 			fmt.Println("piece length must be a integer")
-			os.Exit(1)
-		}
-		hash, err := calculateInfoHash(data)
-		if err != nil {
-			fmt.Printf("error while hashing the info section: %v", err)
 			os.Exit(1)
 		}
 
@@ -281,9 +342,9 @@ func main() {
 			os.Exit(1)
 		}
 
-		fmt.Printf("Tracker URL: %s\n", announce)
-		fmt.Printf("Length: %d\n", info["length"])
-		fmt.Printf("Info Hash: %x\n", hash)
+		fmt.Printf("Tracker URL: %s\n", metadata.Announce)
+		fmt.Printf("Length: %d\n", metadata.Info["length"])
+		fmt.Printf("Info Hash: %x\n", metadata.InfoHash)
 		fmt.Printf("Piece Length: %d\n", pieceLength)
 		fmt.Println("Piece Hashes:")
 		count := len(pieces) / 20
@@ -295,51 +356,24 @@ func main() {
 			fmt.Println("not enough arguments, you must provide the path of the .torrent file")
 			os.Exit(1)
 		}
-		data, err := os.ReadFile(os.Args[2])
-		if err != nil {
-			fmt.Printf("error while opening the file %v", err)
-			os.Exit(1)
-		}
-		decoded, err := decodeBencode(string(data))
-		if err != nil {
-			fmt.Printf("torrent metadata could not be decoded: %v", err)
-			os.Exit(1)
-		}
-		torrent, ok := decoded.(map[string]interface{})
-		if !ok {
-			fmt.Println("torrent metadata must be a dictionary")
-			os.Exit(1)
-		}
 
-		hash, err := calculateInfoHash(data)
+		metadata, err := loadTorrentMetadata(os.Args[2])
 		if err != nil {
-			fmt.Printf("error while hashing the info section: %v", err)
+			fmt.Printf("error while loading torrent metadata: %v", err)
 			os.Exit(1)
 		}
 
 		peerID := []byte("-BT0001-123456789012") // exactly 20 bytes
 
-		announce, ok := torrent["announce"].(string)
-		if !ok {
-			fmt.Println("Tracker URL must be a string")
-			os.Exit(1)
-		}
-
-		info, ok := torrent["info"].(map[string]interface{})
-		if !ok {
-			fmt.Println("torrent info must be a dictionary")
-			os.Exit(1)
-		}
-
-		length, ok := info["length"].(int)
-		if !ok {
-			fmt.Println("error while parsing length")
+		length, err := torrentLength(metadata.Info)
+		if err != nil {
+			fmt.Println(err)
 			os.Exit(1)
 		}
 
 		trackerRequest := TrackerRequest{
-			AnnounceURL: announce,
-			InfoHash:    hash,
+			AnnounceURL: metadata.Announce,
+			InfoHash:    metadata.InfoHash,
 			PeerID:      [20]byte(peerID),
 			Port:        6881,
 			Uploaded:    0,
@@ -360,14 +394,9 @@ func main() {
 			os.Exit(1)
 		}
 
-		decoded, err = decodeBencode(string(responseData))
+		trackerResponse, err := decodeTrackerResponse(responseData)
 		if err != nil {
-			fmt.Printf("error while decoding the response: %v", err)
-			os.Exit(1)
-		}
-		trackerResponse, ok := decoded.(map[string]interface{})
-		if !ok {
-			fmt.Println("error while decoding the response")
+			fmt.Println(err)
 			os.Exit(1)
 		}
 		peers, ok := trackerResponse["peers"].(string)
@@ -376,19 +405,131 @@ func main() {
 			os.Exit(1)
 		}
 
-		if len(peers)%6 != 0 {
-			fmt.Println("compact peer data has invalid length")
+		peerAddresses, err := parseCompactPeers(peers)
+		if err != nil {
+			fmt.Println(err)
 			os.Exit(1)
 		}
-		for i := 0; i < len(peers); i += 6 {
-			ip := net.IP([]byte(peers[i : i+4]))
-			port := binary.BigEndian.Uint16([]byte(peers[i+4 : i+6]))
-
-			fmt.Printf("%s:%d\n", ip, port)
+		for _, peerAddress := range peerAddresses {
+			fmt.Println(peerAddress)
 		}
+
+	case "handshake":
+		if len(os.Args) < 4 {
+			fmt.Println("not enough arguments: handshake sample.torrent <peer_ip>:<peer_port>")
+			os.Exit(1)
+		}
+
+		host, port, err := parsePeerAddress(os.Args[3])
+		if err != nil {
+			fmt.Println("invalid address: " + err.Error())
+			os.Exit(1)
+		}
+
+		address := net.JoinHostPort(host, strconv.Itoa(int(port)))
+
+		// get info
+		metadata, err := loadTorrentMetadata(os.Args[2])
+		if err != nil {
+			fmt.Printf("error while loading torrent metadata: %v", err)
+			os.Exit(1)
+		}
+
+		conn, err := net.DialTimeout("tcp", address, 5*time.Second)
+		if err != nil {
+			fmt.Println("error while connecting to the address provided: " + err.Error())
+			os.Exit(1)
+		}
+		defer conn.Close()
+		err = conn.SetDeadline(time.Now().Add(10 * time.Second))
+		if err != nil {
+			fmt.Printf("set connection deadline: %v", err)
+			os.Exit(1)
+		}
+
+		peerID := []byte("-BT0001-123456789012") // exactly 20 bytes
+
+		handshake := buildHandshakePayload(metadata.InfoHash, [20]byte(peerID))
+
+		n, err := conn.Write(handshake)
+		if err != nil {
+			fmt.Printf("send handshake: %v\n", err)
+			os.Exit(1)
+		}
+		if n != len(handshake) {
+			fmt.Printf("send handshake: wrote %d bytes, want %d]n", n, len(handshake))
+			os.Exit(1)
+		}
+
+		response := make([]byte, 68)
+
+		_, err = io.ReadFull(conn, response)
+		if err != nil {
+			fmt.Printf("read handshake response: %v\n", err)
+			os.Exit(1)
+		}
+
+		if response[0] != 19 || string(response[1:20]) != "BitTorrent protocol" {
+			fmt.Println("invalid handshake response")
+			os.Exit(1)
+		}
+
+		if !bytes.Equal(metadata.InfoHash[:], response[28:48]) {
+			fmt.Println("handshake info hash mismatch")
+		}
+
+		receivedPeerID := response[48:68]
+		fmt.Print("Peer ID: ")
+		for _, b := range receivedPeerID {
+			fmt.Printf("%02x", b)
+		}
+		fmt.Println()
 
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
 	}
+}
+
+func parsePeerAddress(address string) (string, uint16, error) {
+	host, portString, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", 0, fmt.Errorf("invalid peer address: %w", err)
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return "", 0, fmt.Errorf("peer host must be an ip address")
+	}
+
+	port, err := strconv.ParseUint(portString, 10, 16)
+	if err != nil {
+		return "", 0, fmt.Errorf("peer port must be between 0 and 65535: %w", err)
+	}
+
+	return ip.String(), uint16(port), nil
+}
+
+func buildHandshakePayload(infoHash [20]byte, peerID [20]byte) []byte {
+	payload := make([]byte, 68)
+	// The handshake is a message consisting of the following parts as described in the peer protocol:
+	protocol := "BitTorrent protocol"
+
+	// length of the protocol string (BitTorrent protocol) which is 19 (1 byte)
+	payload[0] = byte(len(protocol))
+
+	// the string BitTorrent protocol (19 bytes)
+	copy(payload[1:], protocol)
+
+	// eight reserved bytes, which are all set to zero (8 bytes)
+	// payload[20:28] are reserved bytes.
+	// They are already zero because make() zeroes byte slices.
+
+	// sha1 infohash (20 bytes) (NOT the hexadecimal representation, which is 40 bytes long)
+	copy(payload[28:48], infoHash[:])
+
+	// peer id (20 bytes)
+	copy(payload[48:68], peerID[:])
+
+	return payload
 }
