@@ -149,9 +149,12 @@ func downloadPiece(ctx context.Context, peerAddress string, metadata torrentMeta
 	}
 
 	// Wait for a bitfield message from the peer indicating which pieces it has
-	_, err = waitForBitfield(conn)
+	bitfield, err := waitForBitfield(conn)
 	if err != nil {
 		return fmt.Errorf("error while waiting for the bitfield message: %w", err)
+	}
+	if !bitfieldHasPiece(bitfield, pieceIndex) {
+		return fmt.Errorf("peer does not have piece %d", pieceIndex)
 	}
 
 	// Send interested.
@@ -211,7 +214,7 @@ func downloadPiece(ctx context.Context, peerAddress string, metadata torrentMeta
 	return nil
 }
 
-func readPieceBlocks(r io.Reader, pieceIndex int, pieceLength int) ([]byte, error) {
+func readPieceBlocks(conn net.Conn, pieceIndex int, pieceLength int) ([]byte, error) {
 	piece := make([]byte, pieceLength)
 
 	expected := make(map[int]int)
@@ -220,7 +223,10 @@ func readPieceBlocks(r io.Reader, pieceIndex int, pieceLength int) ([]byte, erro
 	}
 
 	for len(expected) > 0 {
-		msg, err := readPeerMessage(r)
+		if err := conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+			return nil, fmt.Errorf("set peer deadline: %w", err)
+		}
+		msg, err := readPeerMessage(conn)
 		if err != nil {
 			return nil, fmt.Errorf("read piece block: %w", err)
 		}
@@ -412,7 +418,7 @@ func parseDownloadPieceArgs(args []string) (string, string, int, error) {
 		return "", "", 0, fmt.Errorf("expected command name")
 	}
 
-	flags := flag.NewFlagSet("download_piece ", flag.ContinueOnError)
+	flags := flag.NewFlagSet("download_piece", flag.ContinueOnError)
 
 	outputPath := flags.String("o", "", "output file path")
 

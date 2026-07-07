@@ -383,7 +383,7 @@ func handlePeersCommand(metadata torrentMetadata, peerID [20]byte) ([]string, er
 
 	trackerResponse, err := decodeTrackerResponse(responseData)
 	if err != nil {
-		fmt.Errorf("error while decoding the tracker response: %w", err)
+		return nil, fmt.Errorf("error while decoding the tracker response: %w", err)
 	}
 	peers, ok := trackerResponse["peers"].(string)
 	if !ok {
@@ -517,6 +517,59 @@ func main() {
 		if isSuccessful == false {
 			fmt.Printf("downloading the piece: %d failed\n", piece_index)
 			os.Exit(1)
+		}
+
+	case "download":
+		if len(os.Args) < 4 {
+			fmt.Println("not enough arguments: download -o /tmp/test.txt sample.torrent")
+			os.Exit(1)
+		}
+
+		outputPath, torrentFile, err := parseDownloadArgs(os.Args)
+		if err != nil {
+			fmt.Println("error while parsing arguments: " + err.Error())
+			os.Exit(1)
+		}
+		metadata, err := loadTorrentMetadata(torrentFile)
+		if err != nil {
+			fmt.Printf("error while loading torrent metadata: %v", err)
+			os.Exit(1)
+		}
+
+		peerAddresses, err := handlePeersCommand(metadata, peerID)
+		if err != nil {
+			fmt.Printf("error while getting the peer addresses: %v", err)
+			os.Exit(1)
+
+		}
+
+		ctx := context.Background()
+
+		indexes, err := pieceIndexes(metadata)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+
+		for _, pieceIndex := range indexes {
+			isSuccessful := false
+
+			for _, peerAddress := range peerAddresses {
+				fmt.Printf("trying peer: %s for piece index (%d)", peerAddress, pieceIndex)
+
+				err := downloadPiece(ctx, peerAddress, metadata, pieceIndex, outputPath+"-"+strconv.FormatInt(int64(pieceIndex), 10), peerID)
+				if err != nil {
+					fmt.Println("error occured while getting the piece from a peer: " + err.Error())
+					fmt.Println("will try another one if there's any")
+				} else {
+					isSuccessful = true
+					break
+				}
+			}
+
+			if isSuccessful == false {
+				fmt.Printf("downloading the piece: %d failed\n", pieceIndex)
+			}
 		}
 
 	default:
