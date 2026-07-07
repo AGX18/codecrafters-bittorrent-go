@@ -75,7 +75,7 @@ func requestMagnetPeers(ctx context.Context, magnet MagnetLink, peerID [20]byte)
 		Port:        6881,
 		Uploaded:    0,
 		Downloaded:  0,
-		Left:        0,
+		Left:        1,
 		Compact:     true,
 	}
 
