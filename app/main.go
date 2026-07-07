@@ -295,6 +295,195 @@ func parseCompactPeers(peers string) ([]string, error) {
 	return addresses, nil
 }
 
+func handleDecodeCommand(args []string) {
+	bencodedValue := args[2]
+
+	decoded, err := decodeBencode(bencodedValue)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	jsonOutput, _ := json.Marshal(decoded)
+	fmt.Println(string(jsonOutput))
+}
+
+func handleInfoCommand(args []string) {
+	if len(args) <= 2 {
+		fmt.Println("not enough arguments, you must provide the path of the .torrent file")
+		os.Exit(1)
+	}
+
+	metadata, err := loadTorrentMetadata(args[2])
+	if err != nil {
+		fmt.Printf("error while loading torrent metadata: %v", err)
+		os.Exit(1)
+	}
+
+	pieceLength, ok := metadata.Info["piece length"].(int)
+	if !ok {
+		fmt.Println("piece length must be a integer")
+		fmt.Printf("Piece length: %v", pieceLength)
+		os.Exit(1)
+	}
+	pieces, ok := metadata.Info["pieces"].(string)
+	if !ok {
+		fmt.Println("piece length must be a integer")
+		os.Exit(1)
+	}
+
+	if len(pieces)%20 != 0 {
+		fmt.Printf("malformed pieces hashes: not 20 bytes each")
+		os.Exit(1)
+	}
+
+	fmt.Printf("Tracker URL: %s\n", metadata.Announce)
+	fmt.Printf("Length: %d\n", metadata.Info["length"])
+	fmt.Printf("Info Hash: %x\n", metadata.InfoHash)
+	fmt.Printf("Piece Length: %d\n", pieceLength)
+	fmt.Println("Piece Hashes:")
+	count := len(pieces) / 20
+	for i := range count {
+		fmt.Printf("%x\n", pieces[20*i:20*i+20])
+	}
+}
+
+func handlePeersCommand(args []string) {
+	if len(args) <= 2 {
+		fmt.Println("not enough arguments, you must provide the path of the .torrent file")
+		os.Exit(1)
+	}
+
+	metadata, err := loadTorrentMetadata(args[2])
+	if err != nil {
+		fmt.Printf("error while loading torrent metadata: %v", err)
+		os.Exit(1)
+	}
+
+	peerID := []byte("-BT0001-123456789012") // exactly 20 bytes
+
+	length, err := torrentLength(metadata.Info)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
+	trackerRequest := TrackerRequest{
+		AnnounceURL: metadata.Announce,
+		InfoHash:    metadata.InfoHash,
+		PeerID:      [20]byte(peerID),
+		Port:        6881,
+		Uploaded:    0,
+		Downloaded:  0,
+		Left:        int64(length),
+		Compact:     true,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	client := &http.Client{
+		Timeout: 20 * time.Second,
+	}
+
+	responseData, err := requestPeers(ctx, client, trackerRequest)
+	if err != nil {
+		fmt.Printf("error while sending the request: %v", err)
+		os.Exit(1)
+	}
+
+	trackerResponse, err := decodeTrackerResponse(responseData)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	peers, ok := trackerResponse["peers"].(string)
+	if !ok {
+		fmt.Println("tracker peers must be a byte string")
+		os.Exit(1)
+	}
+
+	peerAddresses, err := parseCompactPeers(peers)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	for _, peerAddress := range peerAddresses {
+		fmt.Println(peerAddress)
+	}
+}
+
+func handleHandshakeCommand(args []string) {
+	if len(args) < 4 {
+		fmt.Println("not enough arguments: handshake sample.torrent <peer_ip>:<peer_port>")
+		os.Exit(1)
+	}
+
+	host, port, err := parsePeerAddress(args[3])
+	if err != nil {
+		fmt.Println("invalid address: " + err.Error())
+		os.Exit(1)
+	}
+
+	address := net.JoinHostPort(host, strconv.Itoa(int(port)))
+
+	// get info
+	metadata, err := loadTorrentMetadata(args[2])
+	if err != nil {
+		fmt.Printf("error while loading torrent metadata: %v", err)
+		os.Exit(1)
+	}
+
+	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
+	if err != nil {
+		fmt.Println("error while connecting to the address provided: " + err.Error())
+		os.Exit(1)
+	}
+	defer conn.Close()
+	err = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if err != nil {
+		fmt.Printf("set connection deadline: %v", err)
+		os.Exit(1)
+	}
+
+	peerID := []byte("-BT0001-123456789012") // exactly 20 bytes
+
+	handshake := buildHandshakePayload(metadata.InfoHash, [20]byte(peerID))
+
+	n, err := conn.Write(handshake)
+	if err != nil {
+		fmt.Printf("send handshake: %v\n", err)
+		os.Exit(1)
+	}
+	if n != len(handshake) {
+		fmt.Printf("send handshake: wrote %d bytes, want %d]n", n, len(handshake))
+		os.Exit(1)
+	}
+
+	response := make([]byte, 68)
+
+	_, err = io.ReadFull(conn, response)
+	if err != nil {
+		fmt.Printf("read handshake response: %v\n", err)
+		os.Exit(1)
+	}
+
+	if response[0] != 19 || string(response[1:20]) != "BitTorrent protocol" {
+		fmt.Println("invalid handshake response")
+		os.Exit(1)
+	}
+
+	if !bytes.Equal(metadata.InfoHash[:], response[28:48]) {
+		fmt.Println("handshake info hash mismatch")
+	}
+
+	receivedPeerID := response[48:68]
+	fmt.Print("Peer ID: ")
+	for _, b := range receivedPeerID {
+		fmt.Printf("%02x", b)
+	}
+	fmt.Println()
+}
+
 func main() {
 	// You can use print statements as follows for debugging, they'll be visible when running tests.
 	fmt.Fprintln(os.Stderr, "Logs from your program will appear here!")
@@ -303,188 +492,13 @@ func main() {
 
 	switch command {
 	case "decode":
-		bencodedValue := os.Args[2]
-
-		decoded, err := decodeBencode(bencodedValue)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-
-		jsonOutput, _ := json.Marshal(decoded)
-		fmt.Println(string(jsonOutput))
+		handleDecodeCommand(os.Args)
 	case "info":
-		if len(os.Args) <= 2 {
-			fmt.Println("not enough arguments, you must provide the path of the .torrent file")
-			os.Exit(1)
-		}
-
-		metadata, err := loadTorrentMetadata(os.Args[2])
-		if err != nil {
-			fmt.Printf("error while loading torrent metadata: %v", err)
-			os.Exit(1)
-		}
-
-		pieceLength, ok := metadata.Info["piece length"].(int)
-		if !ok {
-			fmt.Println("piece length must be a integer")
-			fmt.Printf("Piece length: %v", pieceLength)
-			os.Exit(1)
-		}
-		pieces, ok := metadata.Info["pieces"].(string)
-		if !ok {
-			fmt.Println("piece length must be a integer")
-			os.Exit(1)
-		}
-
-		if len(pieces)%20 != 0 {
-			fmt.Printf("malformed pieces hashes: not 20 bytes each")
-			os.Exit(1)
-		}
-
-		fmt.Printf("Tracker URL: %s\n", metadata.Announce)
-		fmt.Printf("Length: %d\n", metadata.Info["length"])
-		fmt.Printf("Info Hash: %x\n", metadata.InfoHash)
-		fmt.Printf("Piece Length: %d\n", pieceLength)
-		fmt.Println("Piece Hashes:")
-		count := len(pieces) / 20
-		for i := range count {
-			fmt.Printf("%x\n", pieces[20*i:20*i+20])
-		}
+		handleInfoCommand(os.Args)
 	case "peers":
-		if len(os.Args) <= 2 {
-			fmt.Println("not enough arguments, you must provide the path of the .torrent file")
-			os.Exit(1)
-		}
-
-		metadata, err := loadTorrentMetadata(os.Args[2])
-		if err != nil {
-			fmt.Printf("error while loading torrent metadata: %v", err)
-			os.Exit(1)
-		}
-
-		peerID := []byte("-BT0001-123456789012") // exactly 20 bytes
-
-		length, err := torrentLength(metadata.Info)
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
-
-		trackerRequest := TrackerRequest{
-			AnnounceURL: metadata.Announce,
-			InfoHash:    metadata.InfoHash,
-			PeerID:      [20]byte(peerID),
-			Port:        6881,
-			Uploaded:    0,
-			Downloaded:  0,
-			Left:        int64(length),
-			Compact:     true,
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-
-		client := &http.Client{
-			Timeout: 20 * time.Second,
-		}
-
-		responseData, err := requestPeers(ctx, client, trackerRequest)
-		if err != nil {
-			fmt.Printf("error while sending the request: %v", err)
-			os.Exit(1)
-		}
-
-		trackerResponse, err := decodeTrackerResponse(responseData)
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
-		peers, ok := trackerResponse["peers"].(string)
-		if !ok {
-			fmt.Println("tracker peers must be a byte string")
-			os.Exit(1)
-		}
-
-		peerAddresses, err := parseCompactPeers(peers)
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
-		for _, peerAddress := range peerAddresses {
-			fmt.Println(peerAddress)
-		}
-
+		handlePeersCommand(os.Args)
 	case "handshake":
-		if len(os.Args) < 4 {
-			fmt.Println("not enough arguments: handshake sample.torrent <peer_ip>:<peer_port>")
-			os.Exit(1)
-		}
-
-		host, port, err := parsePeerAddress(os.Args[3])
-		if err != nil {
-			fmt.Println("invalid address: " + err.Error())
-			os.Exit(1)
-		}
-
-		address := net.JoinHostPort(host, strconv.Itoa(int(port)))
-
-		// get info
-		metadata, err := loadTorrentMetadata(os.Args[2])
-		if err != nil {
-			fmt.Printf("error while loading torrent metadata: %v", err)
-			os.Exit(1)
-		}
-
-		conn, err := net.DialTimeout("tcp", address, 5*time.Second)
-		if err != nil {
-			fmt.Println("error while connecting to the address provided: " + err.Error())
-			os.Exit(1)
-		}
-		defer conn.Close()
-		err = conn.SetDeadline(time.Now().Add(10 * time.Second))
-		if err != nil {
-			fmt.Printf("set connection deadline: %v", err)
-			os.Exit(1)
-		}
-
-		peerID := []byte("-BT0001-123456789012") // exactly 20 bytes
-
-		handshake := buildHandshakePayload(metadata.InfoHash, [20]byte(peerID))
-
-		n, err := conn.Write(handshake)
-		if err != nil {
-			fmt.Printf("send handshake: %v\n", err)
-			os.Exit(1)
-		}
-		if n != len(handshake) {
-			fmt.Printf("send handshake: wrote %d bytes, want %d]n", n, len(handshake))
-			os.Exit(1)
-		}
-
-		response := make([]byte, 68)
-
-		_, err = io.ReadFull(conn, response)
-		if err != nil {
-			fmt.Printf("read handshake response: %v\n", err)
-			os.Exit(1)
-		}
-
-		if response[0] != 19 || string(response[1:20]) != "BitTorrent protocol" {
-			fmt.Println("invalid handshake response")
-			os.Exit(1)
-		}
-
-		if !bytes.Equal(metadata.InfoHash[:], response[28:48]) {
-			fmt.Println("handshake info hash mismatch")
-		}
-
-		receivedPeerID := response[48:68]
-		fmt.Print("Peer ID: ")
-		for _, b := range receivedPeerID {
-			fmt.Printf("%02x", b)
-		}
-		fmt.Println()
-
+		handleHandshakeCommand(os.Args)
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
