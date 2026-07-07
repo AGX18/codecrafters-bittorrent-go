@@ -313,9 +313,7 @@ func generatePeerID() ([20]byte, error) {
 	return peerID, nil
 }
 
-func handleDecodeCommand(args []string) {
-	bencodedValue := args[2]
-
+func handleDecodeCommand(bencodedValue string) {
 	decoded, err := decodeBencode(bencodedValue)
 	if err != nil {
 		fmt.Println(err)
@@ -326,13 +324,8 @@ func handleDecodeCommand(args []string) {
 	fmt.Println(string(jsonOutput))
 }
 
-func handleInfoCommand(args []string) {
-	if len(args) <= 2 {
-		fmt.Println("not enough arguments, you must provide the path of the .torrent file")
-		os.Exit(1)
-	}
-
-	metadata, err := loadTorrentMetadata(args[2])
+func handleInfoCommand(torrentPath string) {
+	metadata, err := loadTorrentMetadata(torrentPath)
 	if err != nil {
 		fmt.Printf("error while loading torrent metadata: %v", err)
 		os.Exit(1)
@@ -360,13 +353,8 @@ func handleInfoCommand(args []string) {
 	}
 }
 
-func handlePeersCommand(args []string, peerID [20]byte) {
-	if len(args) <= 2 {
-		fmt.Println("not enough arguments, you must provide the path of the .torrent file")
-		os.Exit(1)
-	}
-
-	metadata, err := loadTorrentMetadata(args[2])
+func handlePeersCommand(torrentPath string, peerID [20]byte) {
+	metadata, err := loadTorrentMetadata(torrentPath)
 	if err != nil {
 		fmt.Printf("error while loading torrent metadata: %v", err)
 		os.Exit(1)
@@ -422,14 +410,9 @@ func handlePeersCommand(args []string, peerID [20]byte) {
 	}
 }
 
-func handleHandshakeCommand(args []string, peerID [20]byte) {
-	if len(args) < 4 {
-		fmt.Println("not enough arguments: handshake sample.torrent <peer_ip>:<peer_port>")
-		os.Exit(1)
-	}
-
+func handleHandshakeCommand(torrentPath string, peerAddress string, peerID [20]byte) {
 	// get info
-	metadata, err := loadTorrentMetadata(args[2])
+	metadata, err := loadTorrentMetadata(torrentPath)
 	if err != nil {
 		fmt.Printf("error while loading torrent metadata: %v", err)
 		os.Exit(1)
@@ -437,7 +420,7 @@ func handleHandshakeCommand(args []string, peerID [20]byte) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	conn, receivedPeerID, err := connectToPeer(ctx, args[3], metadata.InfoHash, peerID)
+	conn, receivedPeerID, err := connectToPeer(ctx, peerAddress, metadata.InfoHash, peerID)
 	if err != nil {
 		fmt.Printf("connect to peer: %v\n", err)
 		os.Exit(1)
@@ -455,26 +438,48 @@ func main() {
 	// You can use print statements as follows for debugging, they'll be visible when running tests.
 	fmt.Fprintln(os.Stderr, "Logs from your program will appear here!")
 
+	if len(os.Args) < 2 {
+		fmt.Println("missing command")
+		os.Exit(1)
+	}
+
 	command := os.Args[1]
-	var peerID [20]byte
-	if command == "peers" || command == "handshake" {
-		var err error
-		peerID, err = generatePeerID()
+
+	switch command {
+	case "decode":
+		if len(os.Args) < 3 {
+			fmt.Println("not enough arguments: decode <bencoded_value>")
+			os.Exit(1)
+		}
+		handleDecodeCommand(os.Args[2])
+	case "info":
+		if len(os.Args) < 3 {
+			fmt.Println("not enough arguments, you must provide the path of the .torrent file")
+			os.Exit(1)
+		}
+		handleInfoCommand(os.Args[2])
+	case "peers":
+		if len(os.Args) < 3 {
+			fmt.Println("not enough arguments, you must provide the path of the .torrent file")
+			os.Exit(1)
+		}
+		peerID, err := generatePeerID()
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}
-	}
-
-	switch command {
-	case "decode":
-		handleDecodeCommand(os.Args)
-	case "info":
-		handleInfoCommand(os.Args)
-	case "peers":
-		handlePeersCommand(os.Args, peerID)
+		handlePeersCommand(os.Args[2], peerID)
 	case "handshake":
-		handleHandshakeCommand(os.Args, peerID)
+		if len(os.Args) < 4 {
+			fmt.Println("not enough arguments: handshake sample.torrent <peer_ip>:<peer_port>")
+			os.Exit(1)
+		}
+		peerID, err := generatePeerID()
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		handleHandshakeCommand(os.Args[2], os.Args[3], peerID)
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
