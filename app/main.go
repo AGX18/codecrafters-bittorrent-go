@@ -579,7 +579,7 @@ func main() {
 				fmt.Printf("downloading the piece: %d failed\n", pieceIndex)
 			}
 		}
-	case "magnet_parse ":
+	case "magnet_parse":
 		magnet, err := parseMagnetLink(os.Args[2])
 		if err != nil {
 			fmt.Println(err)
