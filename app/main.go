@@ -478,9 +478,9 @@ func main() {
 		}
 
 		handleHandshakeCommand(os.Args[2], os.Args[3], peerID)
-	case "download_piece ":
+	case "download_piece":
 		if len(os.Args) < 5 {
-			fmt.Println("not enough arguments: download_piece  -o /tmp/test-piece sample.torrent <piece_index>")
+			fmt.Println("not enough arguments: download-piece -o /tmp/test-piece sample.torrent <piece_index>")
 			os.Exit(1)
 		}
 		outputPath, torrentFile, piece_index, err := parseDownloadPieceArgs(os.Args)
