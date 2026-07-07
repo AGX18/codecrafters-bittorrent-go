@@ -504,11 +504,15 @@ func main() {
 		isSuccessful := false
 		for _, peerAddress := range peerAddresses {
 			fmt.Printf("trying peer: %s", peerAddress)
-			err := downloadPiece(ctx, peerAddress, metadata, piece_index, outputPath, peerID)
+			pieceBytes, err := downloadPiece(ctx, peerAddress, metadata, piece_index, peerID)
 			if err != nil {
 				fmt.Println("error occured while getting the piece from a peer: " + err.Error())
 				fmt.Println("will try another one if there's any")
 			} else {
+				if err := writePieceFile(outputPath, pieceBytes); err != nil {
+					fmt.Println(err)
+					os.Exit(1)
+				}
 				isSuccessful = true
 				break
 			}
@@ -557,11 +561,15 @@ func main() {
 			for _, peerAddress := range peerAddresses {
 				fmt.Printf("trying peer: %s for piece index (%d)", peerAddress, pieceIndex)
 
-				err := downloadPiece(ctx, peerAddress, metadata, pieceIndex, outputPath+"-"+strconv.FormatInt(int64(pieceIndex), 10), peerID)
+				pieceBytes, err := downloadPiece(ctx, peerAddress, metadata, pieceIndex, peerID)
 				if err != nil {
 					fmt.Println("error occured while getting the piece from a peer: " + err.Error())
 					fmt.Println("will try another one if there's any")
 				} else {
+					if err := writePieceAt(outputPath, pieceIndex, metadata.PieceLength, pieceBytes); err != nil {
+						fmt.Println(err)
+						os.Exit(1)
+					}
 					isSuccessful = true
 					break
 				}

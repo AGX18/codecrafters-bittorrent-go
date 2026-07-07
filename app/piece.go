@@ -119,98 +119,116 @@ func pieceBlocks(pieceLength int) []requestedBlock {
 	return blocks
 }
 
-func downloadPiece(ctx context.Context, peerAddress string, metadata torrentMetadata, pieceIndex int, outputPath string, peerID [20]byte) error {
+func downloadPiece(ctx context.Context, peerAddress string, metadata torrentMetadata, pieceIndex int, peerID [20]byte) ([]byte, error) {
 	// TODO: Check if the peer has the piece or not
 	totalLength, err := torrentLength(metadata.Info)
 	if err != nil {
-		return fmt.Errorf("parse torrent length: %w", err)
+		return nil, fmt.Errorf("parse torrent length: %w", err)
 	}
 	pieceLenFromMeta, err := torrentPieceLength(metadata.Info)
 	if err != nil {
-		return fmt.Errorf("error while parsing the piece length: %w", err)
+		return nil, fmt.Errorf("error while parsing the piece length: %w", err)
 	}
 
 	pieceLength, err := pieceLengthForIndex(totalLength, pieceLenFromMeta, pieceIndex)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// 1. Connect to peer.
 	// 2. Handshake.
 	conn, _, err := connectToPeer(ctx, peerAddress, metadata.InfoHash, peerID)
 	if err != nil {
-		return fmt.Errorf("error while connecting to the peer: %w", err)
+		return nil, fmt.Errorf("error while connecting to the peer: %w", err)
 	}
 	defer conn.Close()
 
 	err = conn.SetDeadline(time.Now().Add(15 * time.Second))
 	if err != nil {
-		return fmt.Errorf("set peer deadline: %w", err)
+		return nil, fmt.Errorf("set peer deadline: %w", err)
 	}
 
 	// Wait for a bitfield message from the peer indicating which pieces it has
 	bitfield, err := waitForBitfield(conn)
 	if err != nil {
-		return fmt.Errorf("error while waiting for the bitfield message: %w", err)
+		return nil, fmt.Errorf("error while waiting for the bitfield message: %w", err)
 	}
 	if !bitfieldHasPiece(bitfield, pieceIndex) {
-		return fmt.Errorf("peer does not have piece %d", pieceIndex)
+		return nil, fmt.Errorf("peer does not have piece %d", pieceIndex)
 	}
 
 	// Send interested.
 	if err := conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
-		return fmt.Errorf("set peer deadline: %w", err)
+		return nil, fmt.Errorf("set peer deadline: %w", err)
 	}
 	interestedPayload := buildInterestedMessage()
 	err = writeAll(conn, interestedPayload)
 	if err != nil {
-		return fmt.Errorf("send interested: %w", err)
+		return nil, fmt.Errorf("send interested: %w", err)
 	}
 
 	// 4. Wait for unchoke.
 	if err := conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
-		return fmt.Errorf("set peer deadline: %w", err)
+		return nil, fmt.Errorf("set peer deadline: %w", err)
 	}
 	err = waitForUnchoke(conn)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// 5. Request blocks for that piece.
 	if err := conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
-		return fmt.Errorf("set peer deadline: %w", err)
+		return nil, fmt.Errorf("set peer deadline: %w", err)
 	}
 	err = requestPieceBlocks(conn, pieceIndex, pieceLength)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// 6. Read piece messages.
 	if err := conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
-		return fmt.Errorf("set peer deadline: %w", err)
+		return nil, fmt.Errorf("set peer deadline: %w", err)
 	}
 	pieceBytes, err := readPieceBlocks(conn, pieceIndex, pieceLength)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// 7. Verify piece SHA-1 against info["pieces"].
 	pieces, ok := metadata.Info["pieces"].(string)
 	if !ok {
-		return fmt.Errorf("pieces must be a byte string")
+		return nil, fmt.Errorf("pieces must be a byte string")
 	}
 	hashStart := pieceIndex * 20
 	hashEnd := hashStart + 20
 	if hashStart < 0 || hashEnd > len(pieces) {
-		return fmt.Errorf("piece index out of range")
+		return nil, fmt.Errorf("piece index out of range")
 	}
 	actualHash := sha1.Sum(pieceBytes)
 	if !bytes.Equal(actualHash[:], []byte(pieces[hashStart:hashEnd])) {
-		return fmt.Errorf("piece hash mismatch")
+		return nil, fmt.Errorf("piece hash mismatch")
 	}
-	// 8. Write the piece bytes to outputPath.
-	err = os.WriteFile(outputPath, pieceBytes, 0644)
-	if err != nil {
+	return pieceBytes, nil
+}
+
+func writePieceFile(outputPath string, pieceBytes []byte) error {
+	if err := os.WriteFile(outputPath, pieceBytes, 0644); err != nil {
 		return fmt.Errorf("write piece file: %w", err)
 	}
+
+	return nil
+}
+
+func writePieceAt(outputPath string, pieceIndex int, normalPieceLength int, pieceBytes []byte) error {
+	file, err := os.OpenFile(outputPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return fmt.Errorf("open output file: %w", err)
+	}
+	defer file.Close()
+
+	offset := int64(pieceIndex * normalPieceLength)
+	if _, err := file.WriteAt(pieceBytes, offset); err != nil {
+		return fmt.Errorf("write piece: %w", err)
+	}
+
 	return nil
 }
 
