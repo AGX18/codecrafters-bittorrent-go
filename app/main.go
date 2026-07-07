@@ -353,17 +353,10 @@ func handleInfoCommand(torrentPath string) {
 	}
 }
 
-func handlePeersCommand(torrentPath string, peerID [20]byte) {
-	metadata, err := loadTorrentMetadata(torrentPath)
-	if err != nil {
-		fmt.Printf("error while loading torrent metadata: %v", err)
-		os.Exit(1)
-	}
-
+func handlePeersCommand(metadata torrentMetadata, peerID [20]byte) ([]string, error) {
 	length, err := torrentLength(metadata.Info)
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return nil, fmt.Errorf("error parsing piecelength: %w", err)
 	}
 
 	trackerRequest := TrackerRequest{
@@ -385,29 +378,24 @@ func handlePeersCommand(torrentPath string, peerID [20]byte) {
 
 	responseData, err := requestPeers(ctx, client, trackerRequest)
 	if err != nil {
-		fmt.Printf("error while sending the request: %v", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("error while sending the request: %w", err)
 	}
 
 	trackerResponse, err := decodeTrackerResponse(responseData)
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		fmt.Errorf("error while decoding the tracker response: %w", err)
 	}
 	peers, ok := trackerResponse["peers"].(string)
 	if !ok {
-		fmt.Println("tracker peers must be a byte string")
-		os.Exit(1)
+		return nil, fmt.Errorf("tracker peers must be a byte string")
 	}
 
 	peerAddresses, err := parseCompactPeers(peers)
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return nil, fmt.Errorf("error while parsing the peer addresses: %w", err)
+
 	}
-	for _, peerAddress := range peerAddresses {
-		fmt.Println(peerAddress)
-	}
+	return peerAddresses, nil
 }
 
 func handleHandshakeCommand(torrentPath string, peerAddress string, peerID [20]byte) {
@@ -442,6 +430,11 @@ func main() {
 		fmt.Println("missing command")
 		os.Exit(1)
 	}
+	peerID, err := generatePeerID()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 
 	command := os.Args[1]
 
@@ -463,23 +456,69 @@ func main() {
 			fmt.Println("not enough arguments, you must provide the path of the .torrent file")
 			os.Exit(1)
 		}
-		peerID, err := generatePeerID()
+		metadata, err := loadTorrentMetadata(os.Args[2])
+		if err != nil {
+			fmt.Printf("error while loading torrent metadata: %v", err)
+			os.Exit(1)
+		}
+
+		peerAddresses, err := handlePeersCommand(metadata, peerID)
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}
-		handlePeersCommand(os.Args[2], peerID)
+
+		for _, peerAddress := range peerAddresses {
+			fmt.Println(peerAddress)
+		}
 	case "handshake":
 		if len(os.Args) < 4 {
 			fmt.Println("not enough arguments: handshake sample.torrent <peer_ip>:<peer_port>")
 			os.Exit(1)
 		}
-		peerID, err := generatePeerID()
-		if err != nil {
-			fmt.Println(err)
+
+		handleHandshakeCommand(os.Args[2], os.Args[3], peerID)
+	case "download_piece ":
+		if len(os.Args) < 5 {
+			fmt.Println("not enough arguments: download_piece  -o /tmp/test-piece sample.torrent <piece_index>")
 			os.Exit(1)
 		}
-		handleHandshakeCommand(os.Args[2], os.Args[3], peerID)
+		outputPath, torrentFile, piece_index, err := parseDownloadPieceArgs(os.Args)
+		if err != nil {
+			fmt.Println("error while parsing arguments: " + err.Error())
+			os.Exit(1)
+		}
+		metadata, err := loadTorrentMetadata(torrentFile)
+		if err != nil {
+			fmt.Printf("error while loading torrent metadata: %v", err)
+			os.Exit(1)
+		}
+
+		peerAddresses, err := handlePeersCommand(metadata, peerID)
+		if err != nil {
+			fmt.Printf("error while getting the peer addresses: %v", err)
+			os.Exit(1)
+
+		}
+		ctx := context.Background()
+		isSuccessful := false
+		for _, peerAddress := range peerAddresses {
+			fmt.Printf("trying peer: %s", peerAddress)
+			err := downloadPiece(ctx, peerAddress, metadata, piece_index, outputPath, peerID)
+			if err != nil {
+				fmt.Println("error occured while getting the piece from a peer: " + err.Error())
+				fmt.Println("will try another one if there's any")
+			} else {
+				isSuccessful = true
+				break
+			}
+		}
+
+		if isSuccessful == false {
+			fmt.Printf("downloading the piece: %d failed\n", piece_index)
+			os.Exit(1)
+		}
+
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)

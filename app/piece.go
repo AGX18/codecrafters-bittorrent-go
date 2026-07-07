@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"encoding/binary"
+	"flag"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"time"
 )
@@ -75,16 +78,74 @@ func parsePieceMessage(msg PeerMessage) (int, int, []byte, error) {
 	return index, begin, block, nil
 }
 
+func pieceLengthForIndex(totalLength int, normalPieceLength int, pieceIndex int) (int, error) {
+	if pieceIndex < 0 {
+		return 0, fmt.Errorf("piece index must not be negative")
+	}
+
+	pieceStart := pieceIndex * normalPieceLength
+	if pieceStart >= totalLength {
+		return 0, fmt.Errorf("piece index out of range")
+	}
+
+	remaining := totalLength - pieceStart
+	if remaining < normalPieceLength {
+		return remaining, nil
+	}
+
+	return normalPieceLength, nil
+}
+
+type requestedBlock struct {
+	begin  int
+	length int
+}
+
+func pieceBlocks(pieceLength int) []requestedBlock {
+	var blocks []requestedBlock
+
+	for begin := 0; begin < pieceLength; begin += blockSize {
+		length := blockSize
+		if pieceLength-begin < length {
+			length = pieceLength - begin
+		}
+
+		blocks = append(blocks, requestedBlock{
+			begin:  begin,
+			length: length,
+		})
+	}
+
+	return blocks
+}
+
 func downloadPiece(ctx context.Context, peerAddress string, metadata torrentMetadata, pieceIndex int, outputPath string, peerID [20]byte) error {
-	pieceLength, err := torrentPieceLength(metadata.Info)
+	// TODO: Check if the peer has the piece or not
+	totalLength, err := torrentLength(metadata.Info)
+	if err != nil {
+		return fmt.Errorf("parse torrent length: %w", err)
+	}
+	pieceLenFromMeta, err := torrentPieceLength(metadata.Info)
 	if err != nil {
 		return fmt.Errorf("error while parsing the piece length: %w", err)
 	}
+
+	pieceLength, err := pieceLengthForIndex(totalLength, pieceLenFromMeta, pieceIndex)
+	if err != nil {
+		return err
+	}
+
 	// 1. Connect to peer.
 	// 2. Handshake.
 	conn, _, err := connectToPeer(ctx, peerAddress, metadata.InfoHash, peerID)
 	if err != nil {
 		return fmt.Errorf("error while connecting to the peer: %w", err)
+	}
+	defer conn.Close()
+
+	err = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	if err != nil {
+		return fmt.Errorf("set peer deadline: %w", err)
 	}
 
 	// Wait for a bitfield message from the peer indicating which pieces it has
@@ -94,6 +155,9 @@ func downloadPiece(ctx context.Context, peerAddress string, metadata torrentMeta
 	}
 
 	// Send interested.
+	if err := conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		return fmt.Errorf("set peer deadline: %w", err)
+	}
 	interestedPayload := buildInterestedMessage()
 	err = writeAll(conn, interestedPayload)
 	if err != nil {
@@ -101,37 +165,71 @@ func downloadPiece(ctx context.Context, peerAddress string, metadata torrentMeta
 	}
 
 	// 4. Wait for unchoke.
+	if err := conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		return fmt.Errorf("set peer deadline: %w", err)
+	}
 	err = waitForUnchoke(conn)
 	if err != nil {
 		return err
 	}
 
 	// 5. Request blocks for that piece.
+	if err := conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		return fmt.Errorf("set peer deadline: %w", err)
+	}
 	err = requestPieceBlocks(conn, pieceIndex, pieceLength)
+	if err != nil {
+		return err
+	}
 	// 6. Read piece messages.
+	if err := conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		return fmt.Errorf("set peer deadline: %w", err)
+	}
 	pieceBytes, err := readPieceBlocks(conn, pieceIndex, pieceLength)
 	if err != nil {
 		return err
 	}
-
-	_ = pieceBytes
 	// 7. Verify piece SHA-1 against info["pieces"].
+	pieces, ok := metadata.Info["pieces"].(string)
+	if !ok {
+		return fmt.Errorf("pieces must be a byte string")
+	}
+	hashStart := pieceIndex * 20
+	hashEnd := hashStart + 20
+	if hashStart < 0 || hashEnd > len(pieces) {
+		return fmt.Errorf("piece index out of range")
+	}
+	actualHash := sha1.Sum(pieceBytes)
+	if !bytes.Equal(actualHash[:], []byte(pieces[hashStart:hashEnd])) {
+		return fmt.Errorf("piece hash mismatch")
+	}
 	// 8. Write the piece bytes to outputPath.
+	err = os.WriteFile(outputPath, pieceBytes, 0644)
+	if err != nil {
+		return fmt.Errorf("write piece file: %w", err)
+	}
 	return nil
 }
 
 func readPieceBlocks(r io.Reader, pieceIndex int, pieceLength int) ([]byte, error) {
 	piece := make([]byte, pieceLength)
-	downloaded := 0
 
-	for downloaded < pieceLength {
+	expected := make(map[int]int)
+	for _, block := range pieceBlocks(pieceLength) {
+		expected[block.begin] = block.length
+	}
+
+	for len(expected) > 0 {
 		msg, err := readPeerMessage(r)
 		if err != nil {
 			return nil, fmt.Errorf("read piece block: %w", err)
 		}
 
+		if msg.ID == 0 {
+			return nil, fmt.Errorf("Got a choke response")
+		}
+
 		if msg.ID != 7 {
-			// Ignore non-piece messages for now: have, keep-alive, choke, etc.
 			continue
 		}
 
@@ -141,19 +239,20 @@ func readPieceBlocks(r io.Reader, pieceIndex int, pieceLength int) ([]byte, erro
 		}
 
 		if index != pieceIndex {
-			return nil, fmt.Errorf("wrong piece index")
+			return nil, fmt.Errorf("received block for piece %d, want piece %d", index, pieceIndex)
 		}
 
-		if begin < 0 || begin >= pieceLength {
-			return nil, fmt.Errorf("piece block begin out of range")
+		expectedLength, ok := expected[begin]
+		if !ok {
+			return nil, fmt.Errorf("unexpected piece block begin %d", begin)
 		}
 
-		if begin+len(block) > pieceLength {
-			return nil, fmt.Errorf("piece block exceeds piece length")
+		if len(block) != expectedLength {
+			return nil, fmt.Errorf("piece block length mismatch")
 		}
 
 		copy(piece[begin:begin+len(block)], block)
-		downloaded += len(block)
+		delete(expected, begin)
 	}
 
 	return piece, nil
@@ -306,4 +405,33 @@ func requestPieceBlocks(w io.Writer, pieceIndex int, pieceLength int) error {
 	}
 
 	return nil
+}
+
+func parseDownloadPieceArgs(args []string) (string, string, int, error) {
+	if len(args) < 2 {
+		return "", "", 0, fmt.Errorf("expected command name")
+	}
+
+	flags := flag.NewFlagSet("download_piece ", flag.ContinueOnError)
+
+	outputPath := flags.String("o", "", "output file path")
+
+	if err := flags.Parse(args[2:]); err != nil {
+		return "", "", 0, fmt.Errorf("parse download_piece  flags: %w", err)
+	}
+
+	remaining := flags.Args()
+	if *outputPath == "" {
+		return "", "", 0, fmt.Errorf("output path is required")
+	}
+	if len(remaining) != 2 {
+		return "", "", 0, fmt.Errorf("expected torrent path and piece index")
+	}
+
+	pieceIndex, err := strconv.Atoi(remaining[1])
+	if err != nil {
+		return "", "", 0, fmt.Errorf("parse piece index: %w", err)
+	}
+
+	return *outputPath, remaining[0], pieceIndex, nil
 }
