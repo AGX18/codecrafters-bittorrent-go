@@ -356,6 +356,17 @@ func writeAll(w io.Writer, data []byte) error {
 }
 
 func connectToPeer(ctx context.Context, peerAddress string, infoHash [20]byte, peerID [20]byte) (net.Conn, [20]byte, error) {
+	return connectToPeerWithHandshake(ctx, peerAddress, infoHash, buildHandshakePayload(infoHash, peerID))
+}
+
+func connectToPeerWithExtensions(ctx context.Context, peerAddress string, infoHash [20]byte, peerID [20]byte) (net.Conn, [20]byte, error) {
+	handshake := buildHandshakePayload(infoHash, peerID)
+	handshake[25] |= 0x10
+
+	return connectToPeerWithHandshake(ctx, peerAddress, infoHash, handshake)
+}
+
+func connectToPeerWithHandshake(ctx context.Context, peerAddress string, infoHash [20]byte, handshake []byte) (net.Conn, [20]byte, error) {
 	host, port, err := parsePeerAddress(peerAddress)
 	if err != nil {
 		return nil, [20]byte{}, err
@@ -376,7 +387,6 @@ func connectToPeer(ctx context.Context, peerAddress string, infoHash [20]byte, p
 		return nil, [20]byte{}, fmt.Errorf("set connection deadline: %w", err)
 	}
 
-	handshake := buildHandshakePayload(infoHash, peerID)
 	n, err := conn.Write(handshake)
 	if err != nil {
 		conn.Close()

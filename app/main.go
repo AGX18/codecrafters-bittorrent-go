@@ -580,14 +580,46 @@ func main() {
 			}
 		}
 	case "magnet_parse":
+		if len(os.Args) < 3 {
+			fmt.Println("not enough arguments: magnet_parse <magnet_link>")
+			os.Exit(1)
+		}
+		magnet, err := parseMagnetLink(os.Args[2])
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		if len(magnet.Trackers) == 0 {
+			fmt.Println("magnet link missing tracker url")
+			os.Exit(1)
+		}
+
+		fmt.Println("Tracker URL:", magnet.Trackers[0])
+		fmt.Printf("Info Hash: %x\n", magnet.InfoHash)
+	case "magnet_handshake":
+		if len(os.Args) < 3 {
+			fmt.Println("not enough arguments: magnet_handshake <magnet_link>")
+			os.Exit(1)
+		}
 		magnet, err := parseMagnetLink(os.Args[2])
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}
 
-		fmt.Println("Tracker URL:", magnet.Trackers[0])
-		fmt.Printf("Info Hash: %x\n", magnet.InfoHash)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		receivedPeerID, err := magnetHandshake(ctx, magnet, peerID)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+
+		fmt.Print("Peer ID: ")
+		for _, b := range receivedPeerID {
+			fmt.Printf("%02x", b)
+		}
+		fmt.Println()
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
