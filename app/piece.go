@@ -356,20 +356,21 @@ func writeAll(w io.Writer, data []byte) error {
 }
 
 func connectToPeer(ctx context.Context, peerAddress string, infoHash [20]byte, peerID [20]byte) (net.Conn, [20]byte, error) {
-	return connectToPeerWithHandshake(ctx, peerAddress, infoHash, buildHandshakePayload(infoHash, peerID))
+	conn, receivedPeerID, _, err := connectToPeerWithHandshake(ctx, peerAddress, infoHash, buildHandshakePayload(infoHash, peerID))
+	return conn, receivedPeerID, err
 }
 
-func connectToPeerWithExtensions(ctx context.Context, peerAddress string, infoHash [20]byte, peerID [20]byte) (net.Conn, [20]byte, error) {
+func connectToPeerWithExtensions(ctx context.Context, peerAddress string, infoHash [20]byte, peerID [20]byte) (net.Conn, [20]byte, bool, error) {
 	handshake := buildHandshakePayload(infoHash, peerID)
 	handshake[25] |= 0x10
 
 	return connectToPeerWithHandshake(ctx, peerAddress, infoHash, handshake)
 }
 
-func connectToPeerWithHandshake(ctx context.Context, peerAddress string, infoHash [20]byte, handshake []byte) (net.Conn, [20]byte, error) {
+func connectToPeerWithHandshake(ctx context.Context, peerAddress string, infoHash [20]byte, handshake []byte) (net.Conn, [20]byte, bool, error) {
 	host, port, err := parsePeerAddress(peerAddress)
 	if err != nil {
-		return nil, [20]byte{}, err
+		return nil, [20]byte{}, false, err
 	}
 
 	address := net.JoinHostPort(host, strconv.Itoa(int(port)))
@@ -378,50 +379,52 @@ func connectToPeerWithHandshake(ctx context.Context, peerAddress string, infoHas
 	}
 	conn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
-		return nil, [20]byte{}, fmt.Errorf("connect to peer: %w", err)
+		return nil, [20]byte{}, false, fmt.Errorf("connect to peer: %w", err)
 	}
 
 	err = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	if err != nil {
 		conn.Close()
-		return nil, [20]byte{}, fmt.Errorf("set connection deadline: %w", err)
+		return nil, [20]byte{}, false, fmt.Errorf("set connection deadline: %w", err)
 	}
 
 	n, err := conn.Write(handshake)
 	if err != nil {
 		conn.Close()
-		return nil, [20]byte{}, fmt.Errorf("send handshake: %w", err)
+		return nil, [20]byte{}, false, fmt.Errorf("send handshake: %w", err)
 	}
 	if n != len(handshake) {
 		conn.Close()
-		return nil, [20]byte{}, fmt.Errorf("send handshake: wrote %d bytes, want %d", n, len(handshake))
+		return nil, [20]byte{}, false, fmt.Errorf("send handshake: wrote %d bytes, want %d", n, len(handshake))
 	}
 
 	response := make([]byte, 68)
 	if _, err := io.ReadFull(conn, response); err != nil {
 		conn.Close()
-		return nil, [20]byte{}, fmt.Errorf("read handshake response: %w", err)
+		return nil, [20]byte{}, false, fmt.Errorf("read handshake response: %w", err)
 	}
 
 	if response[0] != 19 || string(response[1:20]) != "BitTorrent protocol" {
 		conn.Close()
-		return nil, [20]byte{}, fmt.Errorf("invalid handshake response")
+		return nil, [20]byte{}, false, fmt.Errorf("invalid handshake response")
 	}
 
 	if !bytes.Equal(infoHash[:], response[28:48]) {
 		conn.Close()
-		return nil, [20]byte{}, fmt.Errorf("handshake info hash mismatch")
+		return nil, [20]byte{}, false, fmt.Errorf("handshake info hash mismatch")
 	}
 
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		conn.Close()
-		return nil, [20]byte{}, fmt.Errorf("clear connection deadline: %w", err)
+		return nil, [20]byte{}, false, fmt.Errorf("clear connection deadline: %w", err)
 	}
 
 	var receivedPeerID [20]byte
 	copy(receivedPeerID[:], response[48:68])
 
-	return conn, receivedPeerID, nil
+	supportsExtensions := response[25]&0x10 != 0
+
+	return conn, receivedPeerID, supportsExtensions, nil
 }
 
 func requestPieceBlocks(w io.Writer, pieceIndex int, pieceLength int) error {

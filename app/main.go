@@ -609,17 +609,14 @@ func main() {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		receivedPeerID, err := magnetHandshake(ctx, magnet, peerID)
+		handshakeResult, err := magnetHandshake(ctx, magnet, peerID)
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}
 
-		fmt.Print("Peer ID: ")
-		for _, b := range receivedPeerID {
-			fmt.Printf("%02x", b)
-		}
-		fmt.Println()
+		fmt.Printf("Peer ID: %x\n", handshakeResult.PeerID)
+		fmt.Printf("Peer Metadata Extension ID: %d\n", handshakeResult.MetadataExtensionID)
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
